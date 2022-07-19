@@ -1,17 +1,12 @@
-import axios from "axios";
-import { GetServerSideProps } from "next";
-import { getSession } from "next-auth/react";
-import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from '@hookform/resolvers/zod'
 import * as z from 'zod'
+import { trpc } from "../../lib/trpc";
 import { useRouter } from "next/router";
-
-interface Question {
-  order: string;
-  description: string;
-  options: string[];
-}
+import { GetServerSideProps } from "next";
+import { getSession } from "next-auth/react";
+import { redis } from "../../lib/database";
+import { questions } from "../../lib/questions";
 
 const answerFormSchema = z.object({
   answer: z.string(),
@@ -20,57 +15,58 @@ const answerFormSchema = z.object({
 type AnswerFormInputs = z.infer<typeof answerFormSchema>;
 
 export default function Quiz() {
-  const [question, setQuestion] = useState<Question | null>(null)
   const router = useRouter()
 
-  const { register, formState: { isDirty, isSubmitting }, handleSubmit, reset } = useForm<AnswerFormInputs>({
+  const { 
+    data: question, 
+    isLoading: isFetchingQuestion, 
+    refetch,
+  } = trpc.useQuery(['fetch-question'])
+
+  const { mutateAsync: sendAnswer } = trpc.useMutation(['send-answer'])
+
+  const { 
+    register, 
+    formState: { isDirty, isSubmitting }, 
+    handleSubmit, 
+    reset,
+  } = useForm<AnswerFormInputs>({
     resolver: zodResolver(answerFormSchema),
     defaultValues: {
-      answer: null,
+      answer: '',
     },
   })
 
-  async function fetchQuestion() {
-    try {
-      const question = await axios.get('/api/fetch-question')
-
-      setQuestion(question.data)
-    } catch (err) {
-      if (err?.response.data.code && err?.response.data.code === 'finished') {
-        await router.push('/app/finished')
-      }
-    }
-  }
-
   async function handleAnswerQuestion(data: AnswerFormInputs) {
-    if (data.answer === null) {
+    if (data.answer === null || !question?.order) {
       return;
     }
 
     try {
-      await axios.post('/api/send-answer', {
+      const { finished } = await sendAnswer({
         order: question.order,
         answer: Number(data.answer),
       })
 
-      fetchQuestion();
-
-      reset()
-    } catch (err) {
+      if (finished) {
+        await router.push('/app/finished')
+      } else {
+        await refetch()
+        reset()
+      }
+    } catch (err: any) {
       if (err?.response.data.message){ 
         alert(err.response.data.message);
       }
-
-      console.error(err);
     }
   }
-
-  useEffect(() => {
-    fetchQuestion();
-  }, [])
-
-  if (!question) {
+  
+  if (isFetchingQuestion || !question) {
     return <p>Carregando...</p>
+  }
+
+  if (!question.options) {
+    return null;
   }
 
   return (
@@ -83,7 +79,7 @@ export default function Quiz() {
             return (
               <li key={option}>
                 <label className="text-lg flex items-center gap-2" htmlFor={`answer-${index}`}>
-                  <input 
+                  <input
                     type="radio" 
                     value={index}
                     id={`answer-${index}`} 
@@ -108,8 +104,8 @@ export default function Quiz() {
   );
 }
 
-export const getServerSideProps: GetServerSideProps = async (ctx) => {
-  const session = await getSession(ctx)
+export const getServerSideProps: GetServerSideProps = async ({ req }) => {
+  const session = await getSession({ req })
 
   if (!session) {
     return {
@@ -120,7 +116,23 @@ export const getServerSideProps: GetServerSideProps = async (ctx) => {
     }
   }
 
+  const allQuestionsAnswered = await redis.hgetall(session.id);
+      
+  if (allQuestionsAnswered) {
+    const lastQuestionAnsweredOrder = Math.max(...Object.keys(allQuestionsAnswered).map(Number))
+    const lastQuestionOrder = Math.max(...questions.map(question => question.order));
+
+    if (lastQuestionAnsweredOrder === lastQuestionOrder) {
+      return {
+        redirect: {
+          destination: '/app/finished',
+          permanent: false,
+        }
+      }
+    }
+  }
+
   return {
     props: {}
   }
-}
+} 
