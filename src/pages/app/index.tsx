@@ -80,6 +80,7 @@ export default function Quiz() {
               <li key={option}>
                 <label className="text-lg flex items-center gap-2" htmlFor={`answer-${index}`}>
                   <input
+                    className="text-violet-500 focus:outline-violet-500"
                     type="radio" 
                     value={index}
                     id={`answer-${index}`} 
